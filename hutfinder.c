@@ -20,6 +20,7 @@ typedef struct
     int64_t seed;
 } ThreadArgs;
 
+
 void logD(const char *msg)
 {
     // log with date before message
