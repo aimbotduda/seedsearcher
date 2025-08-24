@@ -70,3 +70,8 @@ clean:
 hutfinder: release libcubiomes hutfinder.c
 	$(CC) $(CFLAGS) -o hutfinder hutfinder.c libcubiomes.a $(LDFLAGS)
 
+# Build the structure_finder executable against the static library
+.PHONY: structure_finder
+structure_finder: release libcubiomes structure_finder.c
+	$(CC) $(CFLAGS) -o structure_finder structure_finder.c libcubiomes.a $(LDFLAGS)
+
