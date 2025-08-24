@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <string.h>
 #include <inttypes.h>
+#include <sys/ioctl.h>
 
 // Define a struct to hold thread arguments
 typedef struct
@@ -29,6 +30,8 @@ typedef struct
     int selectedCount;
     // selected MC version
     int mcVersion;
+    // per-file flush counters
+    unsigned int flushCounters[32];
 } ThreadArgs;
 
 typedef struct
@@ -36,21 +39,25 @@ typedef struct
     pthread_mutex_t lock;
     uint64_t totalRegions;
     uint64_t processedRegions;
-    uint64_t totalHuts;
-    uint64_t totalMonuments;
     struct timespec startTime;
     int totalThreads;
     volatile int done;
+    // dynamic per-structure progress
+    int selectedCount;
+    const char *selectedLabels[32];
+    uint64_t selectedCounts[32];
 } Progress;
 
 static Progress g_progress;
 
-static void progress_add(uint64_t processed, uint64_t huts, uint64_t mons)
+static void progress_add_multi(uint64_t processed, const int *incs, int count)
 {
     pthread_mutex_lock(&g_progress.lock);
     g_progress.processedRegions += processed;
-    g_progress.totalHuts += huts;
-    g_progress.totalMonuments += mons;
+    for (int i = 0; i < count && i < 32; i++)
+    {
+        g_progress.selectedCounts[i] += (incs ? (uint64_t)incs[i] : 0ULL);
+    }
     pthread_mutex_unlock(&g_progress.lock);
 }
 
@@ -64,16 +71,38 @@ static void humanize_time(double s, int *h, int *m, int *sec)
     *sec = total % 60;
 }
 
+// Returns the current terminal width or a sensible default
+static int get_terminal_width(void)
+{
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
+        return (int)ws.ws_col;
+    char *cols = getenv("COLUMNS");
+    if (cols)
+    {
+        int c = atoi(cols);
+        if (c > 0) return c;
+    }
+    return 120;
+}
+
 static void *progressThread(void *arg)
 {
     (void)arg;
+    static int last_len = 0;
     for (;;)
     {
         pthread_mutex_lock(&g_progress.lock);
         uint64_t done = g_progress.processedRegions;
         uint64_t total = g_progress.totalRegions;
-        uint64_t huts = g_progress.totalHuts;
-        uint64_t mons = g_progress.totalMonuments;
+        int scount = g_progress.selectedCount;
+        const char *labels[32];
+        uint64_t counts[32];
+        for (int i = 0; i < scount && i < 32; i++)
+        {
+            labels[i] = g_progress.selectedLabels[i];
+            counts[i] = g_progress.selectedCounts[i];
+        }
         int finished = g_progress.done;
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
@@ -88,11 +117,85 @@ static void *progressThread(void *arg)
         humanize_time(elapsed, &eh, &em, &es);
         humanize_time(eta, &th, &tm, &ts);
 
-        fprintf(stdout,
-            "\rProgress: %6.2f%% | Huts: %llu | Monuments: %llu | Reg/s: %.2f | ETA: %02dh%02dm%02ds | Elapsed: %02dh%02dm%02ds",
-            perc, (unsigned long long)huts, (unsigned long long)mons, rps,
-            th, tm, ts, eh, em, es);
+        char line[1024];
+        char prefix[256];
+        // Start with ETA and Reg/s at the beginning, then progress
+        snprintf(prefix, sizeof(prefix), "ETA: %02dh%02dm%02ds | Reg/s: %.2f | Progress: %6.2f%%",
+            th, tm, ts, rps, perc);
+
+        // Tail: show elapsed if there is space left
+        char tail[128];
+        snprintf(tail, sizeof(tail), " | Elapsed: %02dh%02dm%02ds", eh, em, es);
+
+        // Build structure tokens
+        char tokens[32][64];
+        int token_lens[32];
+        for (int i = 0; i < scount && i < 32; i++)
+        {
+            snprintf(tokens[i], sizeof(tokens[i]), "%s: %llu",
+                labels[i] ? labels[i] : "struct",
+                (unsigned long long)counts[i]);
+            token_lens[i] = (int)strlen(tokens[i]);
+        }
+
+        int width = get_terminal_width();
+        if (width < 40) width = 40;
+
+        // Try to assemble line that fits into terminal width
+        int used = 0;
+        int hidden = 0;
+        // start with prefix
+        used = snprintf(line, sizeof(line), "\r%s", prefix);
+        // add a space and pipes before tokens
+        used += snprintf(line + used, sizeof(line) - used, " | ");
+
+        // add as many tokens as fit
+        int first = 1;
+        for (int i = 0; i < scount && i < 32; i++)
+        {
+            int need = token_lens[i] + (first ? 0 : 2); // 2 for ", "
+            if (used + need >= width - 1)
+            {
+                hidden = (scount - i);
+                break;
+            }
+            used += snprintf(line + used, sizeof(line) - used, "%s%s",
+                first ? "" : ", ", tokens[i]);
+            first = 0;
+        }
+
+        // If some tokens hidden, try to append "+N more"
+        if (hidden > 0)
+        {
+            char morebuf[32];
+            snprintf(morebuf, sizeof(morebuf), " +%d more", hidden);
+            int need = (first ? 0 : 2) + (int)strlen(morebuf);
+            if (used + need < width - 1)
+            {
+                used += snprintf(line + used, sizeof(line) - used, "%s%s",
+                    first ? "" : ", ", morebuf);
+                first = 0;
+            }
+        }
+
+        // Try to append tail if it fits
+        if (used + (int)strlen(tail) < width - 1)
+        {
+            used += snprintf(line + used, sizeof(line) - used, "%s", tail);
+        }
+
+        // Clear leftovers from previous longer line
+        int pad = last_len - used;
+        if (pad > 0)
+        {
+            memset(line + used, ' ', (size_t)pad);
+            used += pad;
+            line[used] = '\0';
+        }
+
+        fputs(line, stdout);
         fflush(stdout);
+        last_len = used;
 
         if (finished) break;
         usleep(200000);
@@ -114,7 +217,8 @@ void logD(const char *msg)
 // Define a thread function
 
 static int check_and_record_structure(int type, const char *label,
-    int mc, uint64_t s48, int regX, int regZ, Generator *g, FILE *out)
+    int mc, uint64_t s48, int regX, int regZ, Generator *g, FILE *out,
+    unsigned int *flushCounter)
 {
     Pos pos;
     if (!getStructurePos(type, mc, s48, regX, regZ, &pos))
@@ -136,12 +240,18 @@ static int check_and_record_structure(int type, const char *label,
     if (!isViableStructurePos(type, g, pos.x, pos.z, 0))
         return 0;
     fprintf(out, "%s->(%d,%d)reg(%d,%d)\n", label, pos.x, pos.z, regX, regZ);
+    if (flushCounter)
+    {
+        (*flushCounter)++;
+        if (((*flushCounter) & 2047u) == 0u) // every 2048 writes
+            fflush(out);
+    }
     return 1;
 }
 
 static void scanTile(ThreadArgs *args, Generator *g, uint64_t s48,
     int minRX, int minRZ, int maxRX, int maxRZ,
-    FILE **files, long long *numHuts, long long *numMons)
+    FILE **files)
 {
     const int mc = args->mcVersion;
 
@@ -151,21 +261,19 @@ static void scanTile(ThreadArgs *args, Generator *g, uint64_t s48,
     if (tileW == 1 && tileH == 1)
     {
         uint64_t processed = 1;
-        int incHut = 0;
-        int incMonTotal = 0;
+        int incPer[32] = {0};
         for (int i = 0; i < args->selectedCount; i++)
         {
             int type = args->selectedTypes[i];
-            int inc = check_and_record_structure(type, args->selectedLabels[i], mc, s48, minRX, minRZ, g, files[i]);
+            int inc = check_and_record_structure(type, args->selectedLabels[i], mc, s48, minRX, minRZ, g, files[i], &args->flushCounters[i]);
             if (inc)
             {
-                if (type == Swamp_Hut) { (*numHuts) += inc; incHut += inc; }
-                else { (*numMons) += inc; incMonTotal += inc; }
+                incPer[i] += inc;
             }
         }
 
         // update global progress including new finds
-        progress_add(processed, (uint64_t)incHut, (uint64_t)incMonTotal);
+        progress_add_multi(processed, incPer, args->selectedCount);
         return;
     }
 
@@ -176,17 +284,17 @@ static void scanTile(ThreadArgs *args, Generator *g, uint64_t s48,
     {
         // split in X
         if (midRX > minRX)
-            scanTile(args, g, s48, minRX, minRZ, midRX, maxRZ, files, numHuts, numMons);
+            scanTile(args, g, s48, minRX, minRZ, midRX, maxRZ, files);
         if (maxRX > midRX)
-            scanTile(args, g, s48, midRX, minRZ, maxRX, maxRZ, files, numHuts, numMons);
+            scanTile(args, g, s48, midRX, minRZ, maxRX, maxRZ, files);
     }
     else
     {
         // split in Z
         if (midRZ > minRZ)
-            scanTile(args, g, s48, minRX, minRZ, maxRX, midRZ, files, numHuts, numMons);
+            scanTile(args, g, s48, minRX, minRZ, maxRX, midRZ, files);
         if (maxRZ > midRZ)
-            scanTile(args, g, s48, minRX, midRZ, maxRX, maxRZ, files, numHuts, numMons);
+            scanTile(args, g, s48, minRX, midRZ, maxRX, maxRZ, files);
     }
 }
 
@@ -210,16 +318,15 @@ void *threadFunc(void *arg)
         sprintf(filename, "%s/%s_%03d.txt", args->tempDir, args->selectedPrefixes[i], args->numThread);
         files[i] = fopen(filename, "w");
         setvbuf(files[i], NULL, _IOFBF, 1<<20);
+        args->flushCounters[i] = 0u;
     }
 
-    long long numHuts = 0;
-    long long numMonuments = 0;
-
     // Recursive, coarse-to-fine scanning with biome prefilters.
-    scanTile(args, &g, s48, args->startRegionX, args->startRegionZ, args->endRegionX, args->endRegionZ, files, &numHuts, &numMonuments);
+    scanTile(args, &g, s48, args->startRegionX, args->startRegionZ, args->endRegionX, args->endRegionZ, files);
 
     for (int i = 0; i < args->selectedCount; i++)
     {
+        if (files[i]) fflush(files[i]);
         if (files[i]) fclose(files[i]);
     }
 
@@ -241,6 +348,11 @@ int main()
     int64_t seed;
     printf("Enter seed: ");
     scanf("%" SCNd64, &seed);
+    // drain the remainder of the line (including spaces) after numeric input
+    {
+        int ch;
+        while ((ch = getchar()) != '\n' && ch != EOF) {}
+    }
 
     // Select Minecraft version
     printf("Select Minecraft version (enter one index):\n");
@@ -260,11 +372,10 @@ int main()
         printf("  %d) %s\n", i+1, mc2str(versionsList[i]));
     }
     printf("Your choice (default latest): ");
+    fflush(stdout);
     int mcVersion = MC_NEWEST;
     {
         int tmpIdx = 0;
-        // consume newline from previous scanf
-        getchar();
         char vbuf[64];
         if (fgets(vbuf, sizeof(vbuf), stdin))
         {
@@ -360,6 +471,14 @@ int main()
     pthread_mutex_init(&g_progress.lock, NULL);
     g_progress.totalRegions = (uint64_t)regionsAxis * (uint64_t)regionsAxis;
     g_progress.totalThreads = numThreads;
+    // set selected structures for progress display
+    g_progress.selectedCount = (chosenCount <= 32) ? chosenCount : 32;
+    for (int i = 0; i < g_progress.selectedCount; i++)
+    {
+        int sidx = chosenIdx[i];
+        g_progress.selectedLabels[i] = supported[sidx].label;
+        g_progress.selectedCounts[i] = 0ULL;
+    }
     clock_gettime(CLOCK_MONOTONIC, &g_progress.startTime);
 
     pthread_t progThread;
