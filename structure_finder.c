@@ -346,12 +346,50 @@ int main()
     scanf("%d", &numThreads);
 
     int64_t seed;
-    printf("Enter seed: ");
-    scanf("%" SCNd64, &seed);
-    // drain the remainder of the line (including spaces) after numeric input
+    printf("Enter seed (number or string): ");
+    char seedInput[256];
+    if (fgets(seedInput, sizeof(seedInput), stdin))
     {
-        int ch;
-        while ((ch = getchar()) != '\n' && ch != EOF) {}
+        // Remove trailing newline
+        size_t len = strlen(seedInput);
+        if (len > 0 && seedInput[len - 1] == '\n')
+            seedInput[--len] = '\0';
+        
+        // Check if input is purely numeric (with optional leading minus)
+        int isNumeric = 1;
+        char *p = seedInput;
+        if (*p == '-') p++;  // allow negative sign
+        if (*p == '\0') isNumeric = 0;  // empty or just "-"
+        while (*p)
+        {
+            if (*p < '0' || *p > '9')
+            {
+                isNumeric = 0;
+                break;
+            }
+            p++;
+        }
+        
+        if (isNumeric)
+        {
+            // Parse as number directly
+            seed = strtoll(seedInput, NULL, 10);
+        }
+        else
+        {
+            // Convert string to seed using Java's String.hashCode()
+            int32_t hash = 0;
+            for (size_t i = 0; i < len; i++)
+            {
+                hash = hash * 31 + (int32_t)(unsigned char)seedInput[i];
+            }
+            seed = (int64_t)hash;
+            printf("String '%s' converted to seed: %" PRId64 "\n", seedInput, seed);
+        }
+    }
+    else
+    {
+        seed = 0;
     }
 
     // Select Minecraft version
