@@ -344,6 +344,11 @@ int main()
     int numThreads;
     printf("Enter the number of threads: ");
     scanf("%d", &numThreads);
+    // Drain leftover newline from scanf
+    {
+        int ch;
+        while ((ch = getchar()) != '\n' && ch != EOF) {}
+    }
 
     int64_t seed;
     printf("Enter seed (number or string): ");
