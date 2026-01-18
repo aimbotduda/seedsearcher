@@ -75,3 +75,7 @@ hutfinder: release libcubiomes hutfinder.c
 structure_finder: release libcubiomes structure_finder.c
 	$(CC) $(CFLAGS) -o structure_finder structure_finder.c libcubiomes.a $(LDFLAGS)
 
+# Build the groupfinder executable (standalone, doesn't need cubiomes)
+.PHONY: groupfinder
+groupfinder:
+	$(MAKE) -C findgroups
