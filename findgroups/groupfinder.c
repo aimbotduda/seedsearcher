@@ -22,7 +22,10 @@
 #include <fcntl.h>
 #include <time.h>
 #include <errno.h>
+
+#if defined(__APPLE__)
 #include <sys/sysctl.h>
+#endif
 
 /* ============================================================================
  * Configuration - Auto-tuned at runtime
