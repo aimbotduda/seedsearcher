@@ -1,0 +1,35 @@
+name: Build & Release Windows Executables
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone cubiomes
+        run: git clone https://github.com/Cubitect/cubiomes
+
+      - name: Copy project files into cubiomes
+        shell: pwsh
+        run: |
+          Copy-Item structure_finder.c, structure_finder_win.c, hutfinder.c, makefile, compilestart.sh, compilestart_win.bat -Destination cubiomes/
+          Copy-Item findgroups -Destination cubiomes/ -Recurse
+
+      - name: Build (dist mode)
+        shell: cmd
+        working-directory: cubiomes
+        run: compilestart_win.bat dist
+
+      - name: Upload executables to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            cubiomes/structure_finder.exe
+            cubiomes/findgroups/groupfinder.exe
