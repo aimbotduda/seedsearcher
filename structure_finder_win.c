@@ -1,18 +1,23 @@
+/*
+ * structure_finder_win.c - Windows port of structure_finder.c
+ *
+ * Uses native Windows threading (CreateThread), CRITICAL_SECTION,
+ * QueryPerformanceCounter for timing, and Windows console APIs.
+ * Compile with MinGW: gcc -O3 -o structure_finder.exe structure_finder_win.c libcubiomes.a -lm
+ */
+
 #include "generator.h"
 #include "finders.h"
 #include "biomes.h"
 #include "util.h"
 #include <stdio.h>
-#include <unistd.h>
 #include <stdlib.h>
-#include <pthread.h>
 #include <time.h>
-#include <sys/stat.h>
 #include <string.h>
 #include <inttypes.h>
-#include <sys/ioctl.h>
+#include <windows.h>
+#include <direct.h>
 
-// Define a struct to hold thread arguments
 typedef struct
 {
     int totalThreads;
@@ -23,26 +28,23 @@ typedef struct
     int endRegionZ;
     char *tempDir;
     int64_t seed;
-    // user-selected structures
     int selectedTypes[32];
     const char *selectedLabels[32];
     const char *selectedPrefixes[32];
     int selectedCount;
-    // selected MC version
     int mcVersion;
-    // per-file flush counters
     unsigned int flushCounters[32];
 } ThreadArgs;
 
 typedef struct
 {
-    pthread_mutex_t lock;
+    CRITICAL_SECTION lock;
     uint64_t totalRegions;
     uint64_t processedRegions;
-    struct timespec startTime;
+    LARGE_INTEGER startTime;
+    LARGE_INTEGER perfFreq;
     int totalThreads;
     volatile int done;
-    // dynamic per-structure progress
     int selectedCount;
     const char *selectedLabels[32];
     uint64_t selectedCounts[32];
@@ -52,13 +54,13 @@ static Progress g_progress;
 
 static void progress_add_multi(uint64_t processed, const int *incs, int count)
 {
-    pthread_mutex_lock(&g_progress.lock);
+    EnterCriticalSection(&g_progress.lock);
     g_progress.processedRegions += processed;
     for (int i = 0; i < count && i < 32; i++)
     {
         g_progress.selectedCounts[i] += (incs ? (uint64_t)incs[i] : 0ULL);
     }
-    pthread_mutex_unlock(&g_progress.lock);
+    LeaveCriticalSection(&g_progress.lock);
 }
 
 static void humanize_time(double s, int *h, int *m, int *sec)
@@ -71,12 +73,11 @@ static void humanize_time(double s, int *h, int *m, int *sec)
     *sec = total % 60;
 }
 
-// Returns the current terminal width or a sensible default
 static int get_terminal_width(void)
 {
-    struct winsize ws;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0)
-        return (int)ws.ws_col;
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi))
+        return csbi.srWindow.Right - csbi.srWindow.Left + 1;
     char *cols = getenv("COLUMNS");
     if (cols)
     {
@@ -86,13 +87,20 @@ static int get_terminal_width(void)
     return 120;
 }
 
-static void *progressThread(void *arg)
+static double elapsed_since(LARGE_INTEGER start, LARGE_INTEGER freq)
+{
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return (double)(now.QuadPart - start.QuadPart) / (double)freq.QuadPart;
+}
+
+static DWORD WINAPI progressThread(LPVOID arg)
 {
     (void)arg;
-    static int last_len = 0;
+    int last_len = 0;
     for (;;)
     {
-        pthread_mutex_lock(&g_progress.lock);
+        EnterCriticalSection(&g_progress.lock);
         uint64_t done = g_progress.processedRegions;
         uint64_t total = g_progress.totalRegions;
         int scount = g_progress.selectedCount;
@@ -104,11 +112,8 @@ static void *progressThread(void *arg)
             counts[i] = g_progress.selectedCounts[i];
         }
         int finished = g_progress.done;
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        double elapsed = (now.tv_sec - g_progress.startTime.tv_sec)
-            + (now.tv_nsec - g_progress.startTime.tv_nsec) / 1e9;
-        pthread_mutex_unlock(&g_progress.lock);
+        double elapsed = elapsed_since(g_progress.startTime, g_progress.perfFreq);
+        LeaveCriticalSection(&g_progress.lock);
 
         double perc = total ? (100.0 * (double)done / (double)total) : 0.0;
         double rps = elapsed > 0 ? (double)done / elapsed : 0.0;
@@ -119,15 +124,12 @@ static void *progressThread(void *arg)
 
         char line[1024];
         char prefix[256];
-        // Start with ETA and Reg/s at the beginning, then progress
         snprintf(prefix, sizeof(prefix), "ETA: %02dh%02dm%02ds | Reg/s: %.2f | Progress: %6.2f%%",
             th, tm, ts, rps, perc);
 
-        // Tail: show elapsed if there is space left
         char tail[128];
         snprintf(tail, sizeof(tail), " | Elapsed: %02dh%02dm%02ds", eh, em, es);
 
-        // Build structure tokens
         char tokens[32][64];
         int token_lens[32];
         for (int i = 0; i < scount && i < 32; i++)
@@ -141,19 +143,15 @@ static void *progressThread(void *arg)
         int width = get_terminal_width();
         if (width < 40) width = 40;
 
-        // Try to assemble line that fits into terminal width
         int used = 0;
         int hidden = 0;
-        // start with prefix
         used = snprintf(line, sizeof(line), "\r%s", prefix);
-        // add a space and pipes before tokens
         used += snprintf(line + used, sizeof(line) - used, " | ");
 
-        // add as many tokens as fit
         int first = 1;
         for (int i = 0; i < scount && i < 32; i++)
         {
-            int need = token_lens[i] + (first ? 0 : 2); // 2 for ", "
+            int need = token_lens[i] + (first ? 0 : 2);
             if (used + need >= width - 1)
             {
                 hidden = (scount - i);
@@ -164,7 +162,6 @@ static void *progressThread(void *arg)
             first = 0;
         }
 
-        // If some tokens hidden, try to append "+N more"
         if (hidden > 0)
         {
             char morebuf[32];
@@ -178,13 +175,11 @@ static void *progressThread(void *arg)
             }
         }
 
-        // Try to append tail if it fits
         if (used + (int)strlen(tail) < width - 1)
         {
             used += snprintf(line + used, sizeof(line) - used, "%s", tail);
         }
 
-        // Clear leftovers from previous longer line
         int pad = last_len - used;
         if (pad > 0)
         {
@@ -198,17 +193,16 @@ static void *progressThread(void *arg)
         last_len = used;
 
         if (finished) break;
-        usleep(200000);
+        Sleep(200);
     }
     fprintf(stdout, "\n");
     fflush(stdout);
-    return NULL;
+    return 0;
 }
 
 
 void logD(const char *msg)
 {
-    // log with date before message
     time_t t = time(NULL);
     struct tm tm = *localtime(&t);
     printf("[%d-%02d-%02d %02d:%02d:%02d] %s\n", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, msg);
@@ -229,7 +223,7 @@ static int get_structure_dim(int type)
     }
 }
 
-void *threadFunc(void *arg)
+static DWORD WINAPI threadFunc(LPVOID arg)
 {
     ThreadArgs *args = (ThreadArgs *)arg;
 
@@ -252,8 +246,8 @@ void *threadFunc(void *arg)
         args->flushCounters[i] = 0u;
     }
 
-    // Pre-group selected structures by dimension so applySeed is called
-    // at most once per dimension per region instead of once per structure.
+    /* Pre-group selected structures by dimension so applySeed is called
+     * at most once per dimension per region instead of once per structure. */
     static const int dimOrder[3] = { DIM_OVERWORLD, DIM_NETHER, DIM_END };
     int dimStructIdx[3][32];
     int dimStructCount[3] = {0, 0, 0};
@@ -270,12 +264,13 @@ void *threadFunc(void *arg)
         }
     }
 
-    // Thread-local accumulators to avoid locking the global mutex every region
+    /* Thread-local accumulators to avoid locking the critical section
+     * every region. */
     uint64_t localProcessed = 0;
     int localIncs[32] = {0};
 
-    // Flat nested loop replaces the recursive scanTile (which had no
-    // intermediate filtering and only added call overhead).
+    /* Flat nested loop replaces the recursive scanTile (which had no
+     * intermediate filtering and only added call overhead). */
     for (int rx = args->startRegionX; rx < args->endRegionX; rx++)
     {
         for (int rz = args->startRegionZ; rz < args->endRegionZ; rz++)
@@ -290,13 +285,13 @@ void *threadFunc(void *arg)
                     int i = dimStructIdx[d][k];
                     int type = args->selectedTypes[i];
 
-                    // Fast math-only rejection before expensive biome check
+                    /* Fast math-only rejection before expensive biome check */
                     Pos pos;
                     if (!getStructurePos(type, mc, s48, rx, rz, &pos))
                         continue;
 
-                    // Lazy applySeed: only when at least one structure
-                    // passes the position check in this dimension group
+                    /* Lazy applySeed: only when at least one structure
+                     * passes the position check in this dimension group */
                     if (!applied)
                     {
                         applySeed(&g, dimOrder[d], s48);
@@ -325,7 +320,7 @@ void *threadFunc(void *arg)
         }
     }
 
-    // Flush remaining accumulated progress
+    /* Flush remaining accumulated progress */
     if (localProcessed > 0)
         progress_add_multi(localProcessed, localIncs, args->selectedCount);
 
@@ -335,21 +330,18 @@ void *threadFunc(void *arg)
         if (files[i]) fclose(files[i]);
     }
 
-    return NULL;
+    return 0;
 }
 
-int main()
+int main(void)
 {
-
     int regionsAxis = 117188;
     int maxRegion = 58594;
     int minRegion = -maxRegion;
 
-    // Input for number of threads
     int numThreads;
     printf("Enter the number of threads: ");
     scanf("%d", &numThreads);
-    // Drain leftover newline from scanf
     {
         int ch;
         while ((ch = getchar()) != '\n' && ch != EOF) {}
@@ -360,16 +352,14 @@ int main()
     char seedInput[256];
     if (fgets(seedInput, sizeof(seedInput), stdin))
     {
-        // Remove trailing newline
         size_t len = strlen(seedInput);
         if (len > 0 && seedInput[len - 1] == '\n')
             seedInput[--len] = '\0';
-        
-        // Check if input is purely numeric (with optional leading minus)
+
         int isNumeric = 1;
         char *p = seedInput;
-        if (*p == '-') p++;  // allow negative sign
-        if (*p == '\0') isNumeric = 0;  // empty or just "-"
+        if (*p == '-') p++;
+        if (*p == '\0') isNumeric = 0;
         while (*p)
         {
             if (*p < '0' || *p > '9')
@@ -379,15 +369,13 @@ int main()
             }
             p++;
         }
-        
+
         if (isNumeric)
         {
-            // Parse as number directly
             seed = strtoll(seedInput, NULL, 10);
         }
         else
         {
-            // Convert string to seed using Java's String.hashCode()
             int32_t hash = 0;
             for (size_t i = 0; i < len; i++)
             {
@@ -402,7 +390,6 @@ int main()
         seed = 0;
     }
 
-    // Select Minecraft version
     printf("Select Minecraft version (enter one index):\n");
     int versionsList[] = {
         MC_B1_7, MC_B1_8,
@@ -433,7 +420,6 @@ int main()
         }
     }
 
-    // Present supported structures and read user selection as numbers
     struct { int type; const char *label; const char *prefix; } supported[] = {
         { Desert_Pyramid,    "desert_pyramid",   "desert_pyramids" },
         { Jungle_Temple,     "jungle_temple",    "jungle_temples" },
@@ -465,23 +451,21 @@ int main()
     printf("Your choice (e.g., 1 2 4): ");
     int chosenIdx[32];
     int chosenCount = 0;
-    // Read a full line and parse ints
     char line[256];
     if (fgets(line, sizeof(line), stdin))
     {
         char *ctx = NULL;
-        char *tok = strtok_r(line, " \t\n", &ctx);
+        char *tok = strtok_s(line, " \t\n", &ctx);
         while (tok && chosenCount < 32)
         {
             int idx = atoi(tok);
             if (1 <= idx && idx <= supportedCount)
                 chosenIdx[chosenCount++] = idx-1;
-            tok = strtok_r(NULL, " \t\n", &ctx);
+            tok = strtok_s(NULL, " \t\n", &ctx);
         }
     }
     if (chosenCount == 0)
     {
-        // default: huts and monuments
         int idxHut = -1, idxMon = -1;
         for (int i = 0; i < supportedCount; i++)
         {
@@ -492,35 +476,38 @@ int main()
         if (idxMon >= 0) chosenIdx[chosenCount++] = idxMon;
         if (chosenCount == 0)
         {
-            // Fallback: first two entries
             chosenIdx[chosenCount++] = 0;
             if (supportedCount > 1) chosenIdx[chosenCount++] = 1;
         }
     }
 
+    /* Allocate thread handles and args dynamically (no VLAs on MSVC) */
+    HANDLE *threads = (HANDLE *)malloc(numThreads * sizeof(HANDLE));
+    ThreadArgs *threadArgs = (ThreadArgs *)malloc(numThreads * sizeof(ThreadArgs));
+    if (!threads || !threadArgs)
+    {
+        fprintf(stderr, "Failed to allocate thread arrays\n");
+        free(threads);
+        free(threadArgs);
+        return 1;
+    }
 
-    pthread_t threads[numThreads];
-    ThreadArgs threadArgs[numThreads];
+    /* Remove old temp directories */
+    system("for /d %i in (tmp*) do @rmdir /s /q \"%i\" 2>nul");
 
-    // remove old temp directories
-    system("rm -rf tmp*");
-
-    // create new temp directory with date
+    /* Create new temp directory with date */
     time_t t = time(NULL);
     struct tm tm = *localtime(&t);
     char tempDir[64];
     snprintf(tempDir, sizeof(tempDir), "tmp_%d%02d%02d%02d%02d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
-    mkdir(tempDir, 0777);
+    _mkdir(tempDir);
     printf("Created tmp directory: %s\n", tempDir);
 
-    // Initialize global progress and threads
-
-    // Initialize global progress
+    /* Initialize progress tracking */
     memset(&g_progress, 0, sizeof(g_progress));
-    pthread_mutex_init(&g_progress.lock, NULL);
+    InitializeCriticalSection(&g_progress.lock);
     g_progress.totalRegions = (uint64_t)regionsAxis * (uint64_t)regionsAxis;
     g_progress.totalThreads = numThreads;
-    // set selected structures for progress display
     g_progress.selectedCount = (chosenCount <= 32) ? chosenCount : 32;
     for (int i = 0; i < g_progress.selectedCount; i++)
     {
@@ -528,23 +515,21 @@ int main()
         g_progress.selectedLabels[i] = supported[sidx].label;
         g_progress.selectedCounts[i] = 0ULL;
     }
-    clock_gettime(CLOCK_MONOTONIC, &g_progress.startTime);
+    QueryPerformanceFrequency(&g_progress.perfFreq);
+    QueryPerformanceCounter(&g_progress.startTime);
 
-    pthread_t progThread;
-    pthread_create(&progThread, NULL, progressThread, NULL);
+    HANDLE progThread = CreateThread(NULL, 0, progressThread, NULL, 0, NULL);
 
-    // Divide the map area along the X-axis among threads
+    /* Divide the map area along the X-axis among threads */
     int regionsPerThreadX = regionsAxis / numThreads;
     int startRegionX = minRegion;
 
     for (int i = 0; i < numThreads; i++)
     {
-
         threadArgs[i].numThread = i;
         threadArgs[i].tempDir = tempDir;
         threadArgs[i].seed = seed;
         threadArgs[i].totalThreads = numThreads;
-        // selected structures
         threadArgs[i].selectedCount = chosenCount;
         for (int k = 0; k < chosenCount; k++)
         {
@@ -553,38 +538,37 @@ int main()
             threadArgs[i].selectedLabels[k] = supported[sidx].label;
             threadArgs[i].selectedPrefixes[k] = supported[sidx].prefix;
         }
-
-        // Set chosen MC version
         threadArgs[i].mcVersion = mcVersion;
 
-        // Calculate end region for X-axis
         int endRegionX = startRegionX + regionsPerThreadX;
-        if (i == numThreads - 1) // Last thread takes the remaining regions
+        if (i == numThreads - 1)
             endRegionX = maxRegion;
 
         threadArgs[i].startRegionX = startRegionX;
         threadArgs[i].endRegionX = endRegionX;
-        threadArgs[i].startRegionZ = minRegion; // Constant Z-axis
-        threadArgs[i].endRegionZ = maxRegion;   // Constant Z-axis
+        threadArgs[i].startRegionZ = minRegion;
+        threadArgs[i].endRegionZ = maxRegion;
 
-        // Update start region for next thread
         startRegionX = endRegionX;
 
-        // Create thread
-        pthread_create(&threads[i], NULL, threadFunc, (void *)&threadArgs[i]);
+        threads[i] = CreateThread(NULL, 0, threadFunc, (void *)&threadArgs[i], 0, NULL);
     }
 
-    // Wait for all threads to finish
+    /* Wait for all worker threads to finish */
+    WaitForMultipleObjects(numThreads, threads, TRUE, INFINITE);
     for (int i = 0; i < numThreads; i++)
-    {
-        pthread_join(threads[i], NULL);
-    }
+        CloseHandle(threads[i]);
 
-    // Signal progress thread to finish and join
-    pthread_mutex_lock(&g_progress.lock);
+    /* Signal progress thread to finish and wait */
+    EnterCriticalSection(&g_progress.lock);
     g_progress.done = 1;
-    pthread_mutex_unlock(&g_progress.lock);
-    pthread_join(progThread, NULL);
+    LeaveCriticalSection(&g_progress.lock);
+    WaitForSingleObject(progThread, INFINITE);
+    CloseHandle(progThread);
+
+    DeleteCriticalSection(&g_progress.lock);
+    free(threads);
+    free(threadArgs);
 
     return 0;
 }
