@@ -16,10 +16,19 @@ Clone cubiomes into this directory:
 git clone https://github.com/Cubitect/cubiomes
 ```
 
-Then copy all project files into the `cubiomes` directory (overwrite the makefile):
+Then copy all project files into the `cubiomes` directory (overwrite the makefile).
 
-```
+**Linux / macOS (bash):**
+
+```bash
 cp -r structure_finder.c structure_finder_win.c hutfinder.c makefile compilestart.sh compilestart_win.bat findgroups cubiomes/
+```
+
+**Windows (PowerShell):**
+
+```powershell
+Copy-Item structure_finder.c, structure_finder_win.c, hutfinder.c, makefile, compilestart.sh, compilestart_win.bat -Destination cubiomes/
+Copy-Item findgroups -Destination cubiomes/ -Recurse
 ```
 
 Then `cd cubiomes` for all build steps below.
