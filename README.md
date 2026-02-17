@@ -63,20 +63,44 @@ make
 
 ## Windows
 
-Requires [MSYS2](https://www.msys2.org/) with MinGW-w64 toolchain installed.
+Requires a MinGW-w64 toolchain (GCC + GNU Make). Pick **any one** of the options below.
 
-### Install MSYS2 + MinGW-w64
+### Option A: w64devkit (easiest -- portable, no install)
 
-1. Download and install MSYS2 from https://www.msys2.org/
-2. Open the **MSYS2 UCRT64** terminal and install the toolchain:
-   ```
-   pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-make
-   ```
-3. Add MinGW to your system PATH (e.g. `C:\msys64\ucrt64\bin`)
+1. Download the latest release from https://github.com/skeeto/w64devkit/releases
+2. Extract the zip anywhere (e.g. `C:\w64devkit`)
+3. Run `w64devkit.exe` -- this opens a shell with `gcc`, `make`, and `ar` ready to use
+4. `cd` to the `cubiomes` directory and proceed to [Build](#build) below
+
+### Option B / C / D: WinLibs, MSYS2, or Chocolatey
+
+Pick one of:
+
+- **WinLibs**: Download a release from https://winlibs.com/ (pick the UCRT runtime), extract it
+- **MSYS2**: Install from https://www.msys2.org/, then in the **MSYS2 UCRT64** terminal run:
+  ```
+  pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-make
+  ```
+- **Chocolatey**: `choco install mingw` (PATH is added automatically)
+
+Then make sure MinGW is in your system PATH. Open PowerShell and check:
+
+```powershell
+gcc --version
+```
+
+If that prints "not recognized", add it to PATH:
+
+1. Find the `bin` folder containing `gcc.exe` (common locations: `C:\msys64\ucrt64\bin`, `C:\mingw64\bin`)
+2. Press `Win + R`, type `sysdm.cpl`, hit Enter
+3. Go to **Advanced** tab > **Environment Variables**
+4. Under **System variables**, select **Path**, click **Edit**
+5. Click **New** and paste the path to the `bin` folder
+6. Click OK on all dialogs and reopen PowerShell
 
 ### Build
 
-From a **Command Prompt** or **PowerShell** (with MinGW in PATH), inside the `cubiomes` directory:
+From a **Command Prompt**, **PowerShell**, or **w64devkit shell** (with `gcc` available), inside the `cubiomes` directory:
 
 ```
 compilestart_win.bat
