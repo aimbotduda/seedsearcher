@@ -30,7 +30,7 @@ if not exist libcubiomes.a (
 
 echo.
 echo === Building structure_finder.exe ===
-gcc -O3 -march=native -ffast-math -flto -o structure_finder.exe structure_finder_win.c libcubiomes.a -lm
+gcc -O3 -march=native -ffast-math -o structure_finder.exe structure_finder_win.c libcubiomes.a -lm
 if %errorlevel% neq 0 (
     echo ERROR: Failed to build structure_finder.exe
     exit /b 1
@@ -38,7 +38,7 @@ if %errorlevel% neq 0 (
 
 echo.
 echo === Building groupfinder.exe ===
-gcc -O3 -march=native -ffast-math -flto -o findgroups\groupfinder.exe findgroups\groupfinder_win.c -lm
+gcc -O3 -march=native -ffast-math -o findgroups\groupfinder.exe findgroups\groupfinder_win.c -lm
 if %errorlevel% neq 0 (
     echo ERROR: Failed to build groupfinder.exe
     exit /b 1

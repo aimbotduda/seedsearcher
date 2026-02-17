@@ -19,15 +19,18 @@ all: release
 
 debug: CFLAGS += -DDEBUG -O0 -ggdb3
 debug: libcubiomes
-release: CFLAGS += -O3 -flto
+ifeq ($(OS),Windows_NT)
+release: CFLAGS += -O3
+release: libcubiomes
+native: CFLAGS += -O3 -march=native -ffast-math
+native: libcubiomes
+else
+release: CFLAGS += -O3 -flto -fPIC
 release: LDFLAGS += -flto
 release: libcubiomes
 native: CFLAGS += -O3 -march=native -ffast-math -flto
 native: LDFLAGS += -flto
 native: libcubiomes
-
-ifneq ($(OS),Windows_NT)
-release: CFLAGS += -fPIC
 #debug: CFLAGS += -fsanitize=undefined
 endif
 
