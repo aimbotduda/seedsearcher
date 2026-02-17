@@ -2,10 +2,14 @@
 
 Scans Minecraft seeds for structures using [cubiomes](https://github.com/Cubitect/cubiomes), then finds groups of nearby structures.
 
-## Prerequisites
+## Pre-built Windows Executables
+
+If you just want to run this on Windows, grab `structure_finder.exe` and `findgroups\groupfinder.exe` from the [Releases](../../releases) page -- no compiler needed.
+
+## Prerequisites (building from source)
 
 - **GCC** (via system package manager, MinGW-w64, or MSYS2)
-- **GNU Make** (`make` on Linux/macOS, `mingw32-make` or `make` on Windows)
+- **GNU Make** (`make` on Linux/macOS; **not** required on Windows)
 - **Git** (to clone cubiomes)
 
 ## Setup
@@ -106,7 +110,13 @@ From a **Command Prompt**, **PowerShell**, or **w64devkit shell** (with `gcc` av
 compilestart_win.bat
 ```
 
-This builds the cubiomes library and compiles the Windows executables (`structure_finder.exe` and `findgroups\groupfinder.exe`).
+This compiles all cubiomes sources together with the executables in a single pass (unity build), so the compiler can fully optimise across the codebase -- no separate library step needed.
+
+To build a **portable executable** for distribution (runs on any 64-bit Windows PC):
+
+```
+compilestart_win.bat dist
+```
 
 ### Run
 
