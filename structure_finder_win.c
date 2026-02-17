@@ -481,6 +481,19 @@ int main(void)
         }
     }
 
+    /* Ask whether to merge output files when done (recommended for groupfinder) */
+    int mergeFiles = 1;
+    {
+        printf("Merge all output files into one when done? (recommended for groupfinder) [Y/n]: ");
+        fflush(stdout);
+        char mbuf[64];
+        if (fgets(mbuf, sizeof(mbuf), stdin))
+        {
+            if (mbuf[0] == 'n' || mbuf[0] == 'N')
+                mergeFiles = 0;
+        }
+    }
+
     /* Allocate thread handles and args dynamically (no VLAs on MSVC) */
     HANDLE *threads = (HANDLE *)malloc(numThreads * sizeof(HANDLE));
     ThreadArgs *threadArgs = (ThreadArgs *)malloc(numThreads * sizeof(ThreadArgs));
@@ -565,6 +578,47 @@ int main(void)
     LeaveCriticalSection(&g_progress.lock);
     WaitForSingleObject(progThread, INFINITE);
     CloseHandle(progThread);
+
+    /* Merge all per-thread output files into a single file for groupfinder */
+    if (mergeFiles)
+    {
+        char mergedPath[128];
+        snprintf(mergedPath, sizeof(mergedPath), "%s\\all_structures.txt", tempDir);
+        FILE *merged = fopen(mergedPath, "w");
+        if (merged)
+        {
+            setvbuf(merged, NULL, _IOFBF, 1 << 20);
+            uint64_t totalLines = 0;
+            for (int k = 0; k < chosenCount; k++)
+            {
+                int sidx = chosenIdx[k];
+                for (int thr = 0; thr < numThreads; thr++)
+                {
+                    char fname[256];
+                    snprintf(fname, sizeof(fname), "%s/%s_%03d.txt",
+                        tempDir, supported[sidx].prefix, thr);
+                    FILE *in = fopen(fname, "r");
+                    if (!in) continue;
+                    char buf[8192];
+                    size_t n;
+                    while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+                    {
+                        fwrite(buf, 1, n, merged);
+                        for (size_t b = 0; b < n; b++)
+                            if (buf[b] == '\n') totalLines++;
+                    }
+                    fclose(in);
+                }
+            }
+            fclose(merged);
+            printf("Merged %llu structures into: %s\n",
+                (unsigned long long)totalLines, mergedPath);
+        }
+        else
+        {
+            fprintf(stderr, "Warning: could not create merged file %s\n", mergedPath);
+        }
+    }
 
     DeleteCriticalSection(&g_progress.lock);
     free(threads);
